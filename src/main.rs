@@ -5,8 +5,10 @@
 //! in its `output_plugin` module — this program implements that specification
 //! independently rather than importing types from it.
 
-use std::io::{BufRead, BufReader, Write};
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Write};
+
+mod server;
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -84,6 +86,8 @@ fn main() {
 
     // 2. Await Open configuration
     let (mut current_width, mut current_height);
+    let mut syphon_server;
+
     loop {
         line.clear();
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -107,6 +111,17 @@ fn main() {
                 }
                 current_width = width;
                 current_height = height;
+
+                match server::SyphonServer::new(&server_name) {
+                    Ok(srv) => {
+                        syphon_server = Some(srv);
+                    }
+                    Err(e) => {
+                        eprintln!("karakuri-syphon: failed to initialize Syphon server: {e}");
+                        return;
+                    }
+                }
+
                 eprintln!(
                     "karakuri-syphon: configured for {width}x{height} {format} (server: {server_name})"
                 );
@@ -146,20 +161,27 @@ fn main() {
                 height,
             }) => {
                 frame_count += 1;
-                // Here the Syphon framework integration publishes the IOSurfaceID.
-                // For now in the protocol skeleton, we track frame arrival.
                 if current_width != width || current_height != height {
                     current_width = width;
                     current_height = height;
                 }
+
+                if let Some(ref mut srv) = syphon_server {
+                    srv.publish_surface(surface_id);
+                }
+
                 if last_status.elapsed() >= std::time::Duration::from_secs(1) {
+                    let clients = syphon_server
+                        .as_ref()
+                        .map(|s| s.client_count())
+                        .unwrap_or(0);
                     emit(&PluginMessage::Status {
-                        clients: 0,
+                        clients,
                         dropped: 0,
                     });
                     last_status = std::time::Instant::now();
                     eprintln!(
-                        "karakuri-syphon: streaming active (frame {index}, surface_id {surface_id}, total {frame_count})"
+                        "karakuri-syphon: streaming active (frame {index}, surface_id {surface_id}, total {frame_count}, clients {clients})"
                     );
                 }
             }
@@ -178,5 +200,9 @@ fn main() {
             }
             _ => {}
         }
+    }
+
+    if let Some(mut srv) = syphon_server.take() {
+        srv.stop();
     }
 }

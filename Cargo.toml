@@ -10,5 +10,30 @@ description = "A Syphon output sink plugin that speaks Karakuri's output-plugin 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = [
+    "NSString",
+    "NSDictionary",
+    "NSArray",
+    "NSValue",
+    "NSNotification",
+    "NSDistributedNotificationCenter",
+    "NSKeyedArchiver",
+    "NSSet",
+    "NSUUID",
+    "NSData",
+] }
+objc2-core-foundation = { version = "0.3.2", features = [
+    "CFMessagePort",
+    "CFData",
+    "CFDate",
+    "CFString",
+    "CFRunLoop",
+    "dispatch2",
+] }
+dispatch2 = "0.3.1"
+
 [profile.release]
 opt-level = 2
+
