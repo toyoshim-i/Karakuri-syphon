@@ -9,7 +9,7 @@
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::sync::{Arc, Mutex};
 
@@ -18,8 +18,8 @@ mod macos {
     use objc2::runtime::AnyObject;
     use objc2::ClassType;
     use objc2_core_foundation::{
-        kCFMessagePortSuccess, CFData, CFIndex, CFMessagePort, CFMessagePortContext, CFRetained,
-        CFString,
+        kCFMessagePortIsInvalid, kCFMessagePortSuccess, CFData, CFIndex, CFMessagePort,
+        CFMessagePortContext, CFRetained, CFString,
     };
     use objc2_foundation::{
         ns_string, NSArray, NSDictionary, NSDistributedNotificationCenter, NSKeyedArchiver,
@@ -46,7 +46,7 @@ mod macos {
         name: String,
         surface_id: u32,
         info_clients: HashMap<String, RemotePort>,
-        frame_clients: HashSet<String>,
+        frame_clients: HashMap<String, RemotePort>,
     }
 
     unsafe extern "C-unwind" fn retain_state(info: *const c_void) -> *const c_void {
@@ -93,6 +93,7 @@ mod macos {
         match msgid {
             SYPHON_MSG_ADD_CLIENT_FOR_INFO => {
                 if let Some(ref client_id) = client_uuid {
+                    eprintln!("karakuri-syphon: add info client `{client_id}`");
                     let remote_name = CFString::from_str(client_id);
                     if let Some(remote_port) = CFMessagePort::new_remote(None, Some(&remote_name)) {
                         let mut guard = match state_arc.lock() {
@@ -106,31 +107,48 @@ mod macos {
                         drop(guard);
 
                         if surface_id != 0 {
-                            let _ = send_surface_id(&remote_port, surface_id);
+                            let res = send_surface_id(&remote_port, surface_id);
+                            eprintln!("karakuri-syphon: sent initial surface_id {surface_id} to `{client_id}` (result={res})");
                         }
+                    } else {
+                        eprintln!("karakuri-syphon: failed to create remote port for info client `{client_id}`");
                     }
                 }
             }
             SYPHON_MSG_ADD_CLIENT_FOR_FRAMES => {
                 if let Some(ref client_id) = client_uuid {
+                    eprintln!("karakuri-syphon: add frame client `{client_id}`");
                     let mut guard = match state_arc.lock() {
                         Ok(g) => g,
                         Err(poisoned) => poisoned.into_inner(),
                     };
-                    guard.frame_clients.insert(client_id.clone());
+                    let remote_port = guard
+                        .info_clients
+                        .get(client_id)
+                        .map(|p| p.0.clone())
+                        .or_else(|| {
+                            let remote_name = CFString::from_str(client_id);
+                            CFMessagePort::new_remote(None, Some(&remote_name))
+                        });
                     let surface_id = guard.surface_id;
-                    let remote = guard.info_clients.get(client_id).map(|p| p.0.clone());
-                    drop(guard);
+                    if let Some(remote) = remote_port {
+                        guard
+                            .frame_clients
+                            .insert(client_id.clone(), RemotePort(remote.clone()));
+                        drop(guard);
 
-                    if surface_id != 0 {
-                        if let Some(remote) = remote {
-                            let _ = send_new_frame(&remote);
+                        if surface_id != 0 {
+                            let res = send_new_frame(&remote);
+                            eprintln!("karakuri-syphon: sent initial frame to `{client_id}` (result={res})");
                         }
+                    } else {
+                        eprintln!("karakuri-syphon: failed to create remote port for frame client `{client_id}`");
                     }
                 }
             }
             SYPHON_MSG_REMOVE_CLIENT_FOR_INFO => {
                 if let Some(ref client_id) = client_uuid {
+                    eprintln!("karakuri-syphon: remove info client `{client_id}`");
                     let mut guard = match state_arc.lock() {
                         Ok(g) => g,
                         Err(poisoned) => poisoned.into_inner(),
@@ -140,6 +158,7 @@ mod macos {
             }
             SYPHON_MSG_REMOVE_CLIENT_FOR_FRAMES => {
                 if let Some(ref client_id) = client_uuid {
+                    eprintln!("karakuri-syphon: remove frame client `{client_id}`");
                     let mut guard = match state_arc.lock() {
                         Ok(g) => g,
                         Err(poisoned) => poisoned.into_inner(),
@@ -153,19 +172,19 @@ mod macos {
         std::ptr::null()
     }
 
-    fn send_surface_id(port: &CFMessagePort, surface_id: u32) -> bool {
+    fn send_surface_id(port: &CFMessagePort, surface_id: u32) -> i32 {
         let num = NSNumber::new_u32(surface_id);
         let Ok(data) = (unsafe {
             NSKeyedArchiver::archivedDataWithRootObject_requiringSecureCoding_error(&num, true)
         }) else {
-            return false;
+            return -1;
         };
         let bytes = unsafe { data.as_bytes_unchecked() };
         let Some(cf_data) = (unsafe { CFData::new(None, bytes.as_ptr(), bytes.len() as CFIndex) })
         else {
-            return false;
+            return -1;
         };
-        let res = unsafe {
+        unsafe {
             port.send_request(
                 SYPHON_MSG_UPDATE_SURFACE_ID,
                 Some(&cf_data),
@@ -174,12 +193,11 @@ mod macos {
                 None,
                 std::ptr::null_mut(),
             )
-        };
-        res == kCFMessagePortSuccess
+        }
     }
 
-    fn send_new_frame(port: &CFMessagePort) -> bool {
-        let res = unsafe {
+    fn send_new_frame(port: &CFMessagePort) -> i32 {
+        unsafe {
             port.send_request(
                 SYPHON_MSG_NEW_FRAME,
                 None,
@@ -188,8 +206,7 @@ mod macos {
                 None,
                 std::ptr::null_mut(),
             )
-        };
-        res == kCFMessagePortSuccess
+        }
     }
 
     fn send_retire(port: &CFMessagePort) -> bool {
@@ -268,7 +285,7 @@ mod macos {
                 name: server_name.to_string(),
                 surface_id: 0,
                 info_clients: HashMap::new(),
-                frame_clients: HashSet::new(),
+                frame_clients: HashMap::new(),
             }));
 
             let port_name = CFString::from_str(&uuid);
@@ -334,7 +351,7 @@ mod macos {
             let frame_clients: Vec<(String, CFRetained<CFMessagePort>)> = guard
                 .frame_clients
                 .iter()
-                .filter_map(|k| guard.info_clients.get(k).map(|v| (k.clone(), v.0.clone())))
+                .map(|(k, v)| (k.clone(), v.0.clone()))
                 .collect();
 
             drop(guard);
@@ -342,7 +359,8 @@ mod macos {
             let mut dead_info = Vec::new();
             if id_changed && surface_id != 0 {
                 for (id, port) in &info_clients {
-                    if !send_surface_id(port, surface_id) {
+                    let res = send_surface_id(port, surface_id);
+                    if res == kCFMessagePortIsInvalid {
                         dead_info.push(id.clone());
                     }
                 }
@@ -350,7 +368,8 @@ mod macos {
 
             let mut dead_frame = Vec::new();
             for (id, port) in &frame_clients {
-                if !send_new_frame(port) {
+                let res = send_new_frame(port);
+                if res == kCFMessagePortIsInvalid {
                     dead_frame.push(id.clone());
                 }
             }
@@ -360,11 +379,13 @@ mod macos {
                     Ok(g) => g,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                for id in dead_info {
-                    guard.info_clients.remove(&id);
+                for id in &dead_info {
+                    eprintln!("karakuri-syphon: removing invalid info client `{id}`");
+                    guard.info_clients.remove(id);
                 }
-                for id in dead_frame {
-                    guard.frame_clients.remove(&id);
+                for id in &dead_frame {
+                    eprintln!("karakuri-syphon: removing invalid frame client `{id}`");
+                    guard.frame_clients.remove(id);
                 }
             }
         }
@@ -374,7 +395,7 @@ mod macos {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard.info_clients.len() as u32
+            guard.frame_clients.len().max(guard.info_clients.len()) as u32
         }
 
         pub fn stop(&mut self) {
@@ -383,8 +404,14 @@ mod macos {
                     Ok(g) => g,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                let clients: Vec<CFRetained<CFMessagePort>> =
-                    guard.info_clients.values().map(|p| p.0.clone()).collect();
+                let mut clients_map = HashMap::new();
+                for (k, v) in &guard.info_clients {
+                    clients_map.insert(k.clone(), v.0.clone());
+                }
+                for (k, v) in &guard.frame_clients {
+                    clients_map.entry(k.clone()).or_insert_with(|| v.0.clone());
+                }
+                let clients: Vec<CFRetained<CFMessagePort>> = clients_map.into_values().collect();
                 guard.info_clients.clear();
                 guard.frame_clients.clear();
                 (guard.uuid.clone(), guard.name.clone(), clients)
@@ -406,7 +433,96 @@ mod macos {
             self.stop();
         }
     }
-}
+
+    #[cfg(test)]
+    pub(crate) fn test_port_sending() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static RECEIVED_MSG: AtomicU32 = AtomicU32::new(0);
+        static RECEIVED_SURFACE: AtomicU32 = AtomicU32::new(0);
+
+            unsafe extern "C-unwind" fn test_callback(
+                _local: *mut CFMessagePort,
+                msgid: i32,
+                data: *const CFData,
+                _info: *mut c_void,
+            ) -> *const CFData {
+                RECEIVED_MSG.store(msgid as u32, Ordering::SeqCst);
+                if !data.is_null() {
+                    let cf_data = unsafe { &*data };
+                    let len = cf_data.length() as usize;
+                    if len > 0 {
+                        let slice = unsafe { std::slice::from_raw_parts(cf_data.byte_ptr(), len) };
+                        let ns_data = objc2_foundation::NSData::with_bytes(slice);
+                        if let Ok(unarchived) =
+                            NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(
+                                NSNumber::class(),
+                                &ns_data,
+                            )
+                        {
+                            if let Ok(num) = unarchived.downcast::<NSNumber>() {
+                                RECEIVED_SURFACE.store(num.as_u32(), Ordering::SeqCst);
+                            }
+                        }
+                    }
+                }
+                std::ptr::null()
+            }
+
+            let port_name_str = "info.v002.Syphon.TestPort.12345";
+            let port_name = CFString::from_str(port_name_str);
+            let mut context = CFMessagePortContext {
+                version: 0,
+                info: std::ptr::null_mut(),
+                retain: None,
+                release: None,
+                copyDescription: None,
+            };
+            let mut should_free = 0u8;
+
+            let local_port = unsafe {
+                CFMessagePort::new_local(
+                    None,
+                    Some(&port_name),
+                    Some(test_callback),
+                    &mut context,
+                    &mut should_free,
+                )
+            }
+            .expect("local port");
+
+            let queue = DispatchQueue::new("test.queue", None);
+            unsafe {
+                local_port.set_dispatch_queue(Some(&queue));
+            }
+
+            let remote_port =
+                CFMessagePort::new_remote(None, Some(&port_name)).expect("remote port");
+
+            // Test sending surface ID
+            let res_surface = send_surface_id(&remote_port, 4242);
+            assert_eq!(res_surface, kCFMessagePortSuccess, "send_surface_id must succeed");
+
+            // Wait a bit for dispatch queue
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert_eq!(
+                RECEIVED_MSG.load(Ordering::SeqCst),
+                SYPHON_MSG_UPDATE_SURFACE_ID as u32
+            );
+            assert_eq!(RECEIVED_SURFACE.load(Ordering::SeqCst), 4242);
+
+            // Test sending new frame
+            let res_frame = send_new_frame(&remote_port);
+            assert_eq!(res_frame, kCFMessagePortSuccess, "send_new_frame must succeed");
+
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert_eq!(
+                RECEIVED_MSG.load(Ordering::SeqCst),
+                SYPHON_MSG_NEW_FRAME as u32
+            );
+
+            local_port.invalidate();
+        }
+    }
 
 #[cfg(target_os = "macos")]
 pub use macos::SyphonServer;
@@ -443,5 +559,42 @@ mod tests {
         server.publish_surface(43);
         assert_eq!(server.client_count(), 0);
         server.stop();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_string_and_number_serialization() {
+        use objc2::ClassType;
+        use objc2_foundation::{NSKeyedArchiver, NSKeyedUnarchiver, NSNumber, NSString};
+
+        let orig_str = NSString::from_str("my-client-uuid-12345");
+        let data = unsafe {
+            NSKeyedArchiver::archivedDataWithRootObject_requiringSecureCoding_error(&orig_str, true)
+                .expect("archive string")
+        };
+        let unarchived = unsafe {
+            NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(NSString::class(), &data)
+                .expect("unarchive string")
+        };
+        let decoded_str = unarchived.downcast::<NSString>().expect("downcast NSString");
+        assert_eq!(decoded_str.to_string(), "my-client-uuid-12345");
+
+        let orig_num = NSNumber::new_u32(9999);
+        let num_data = unsafe {
+            NSKeyedArchiver::archivedDataWithRootObject_requiringSecureCoding_error(&orig_num, true)
+                .expect("archive number")
+        };
+        let unarchived_num = unsafe {
+            NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(NSNumber::class(), &num_data)
+                .expect("unarchive number")
+        };
+        let decoded_num = unarchived_num.downcast::<NSNumber>().expect("downcast NSNumber");
+        assert_eq!(decoded_num.as_u32(), 9999);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_message_port_sending() {
+        macos::test_port_sending();
     }
 }
