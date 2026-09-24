@@ -23,7 +23,7 @@ enum HostMessage {
     },
     Frame {
         index: u64,
-        surface_id: u32,
+        surface_id: u64,
         width: u32,
         height: u32,
     },
@@ -167,7 +167,7 @@ fn main() {
                 }
 
                 if let Some(ref mut srv) = syphon_server {
-                    srv.publish_surface(surface_id);
+                    srv.publish_surface(surface_id as u32);
                 }
 
                 if last_status.elapsed() >= std::time::Duration::from_secs(1) {

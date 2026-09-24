@@ -440,89 +440,94 @@ mod macos {
         static RECEIVED_MSG: AtomicU32 = AtomicU32::new(0);
         static RECEIVED_SURFACE: AtomicU32 = AtomicU32::new(0);
 
-            unsafe extern "C-unwind" fn test_callback(
-                _local: *mut CFMessagePort,
-                msgid: i32,
-                data: *const CFData,
-                _info: *mut c_void,
-            ) -> *const CFData {
-                RECEIVED_MSG.store(msgid as u32, Ordering::SeqCst);
-                if !data.is_null() {
-                    let cf_data = unsafe { &*data };
-                    let len = cf_data.length() as usize;
-                    if len > 0 {
-                        let slice = unsafe { std::slice::from_raw_parts(cf_data.byte_ptr(), len) };
-                        let ns_data = objc2_foundation::NSData::with_bytes(slice);
-                        if let Ok(unarchived) =
-                            NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(
-                                NSNumber::class(),
-                                &ns_data,
-                            )
-                        {
-                            if let Ok(num) = unarchived.downcast::<NSNumber>() {
-                                RECEIVED_SURFACE.store(num.as_u32(), Ordering::SeqCst);
-                            }
+        unsafe extern "C-unwind" fn test_callback(
+            _local: *mut CFMessagePort,
+            msgid: i32,
+            data: *const CFData,
+            _info: *mut c_void,
+        ) -> *const CFData {
+            RECEIVED_MSG.store(msgid as u32, Ordering::SeqCst);
+            if !data.is_null() {
+                let cf_data = unsafe { &*data };
+                let len = cf_data.length() as usize;
+                if len > 0 {
+                    let slice = unsafe { std::slice::from_raw_parts(cf_data.byte_ptr(), len) };
+                    let ns_data = objc2_foundation::NSData::with_bytes(slice);
+                    if let Ok(unarchived) =
+                        NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(
+                            NSNumber::class(),
+                            &ns_data,
+                        )
+                    {
+                        if let Ok(num) = unarchived.downcast::<NSNumber>() {
+                            RECEIVED_SURFACE.store(num.as_u32(), Ordering::SeqCst);
                         }
                     }
                 }
-                std::ptr::null()
             }
-
-            let port_name_str = "info.v002.Syphon.TestPort.12345";
-            let port_name = CFString::from_str(port_name_str);
-            let mut context = CFMessagePortContext {
-                version: 0,
-                info: std::ptr::null_mut(),
-                retain: None,
-                release: None,
-                copyDescription: None,
-            };
-            let mut should_free = 0u8;
-
-            let local_port = unsafe {
-                CFMessagePort::new_local(
-                    None,
-                    Some(&port_name),
-                    Some(test_callback),
-                    &mut context,
-                    &mut should_free,
-                )
-            }
-            .expect("local port");
-
-            let queue = DispatchQueue::new("test.queue", None);
-            unsafe {
-                local_port.set_dispatch_queue(Some(&queue));
-            }
-
-            let remote_port =
-                CFMessagePort::new_remote(None, Some(&port_name)).expect("remote port");
-
-            // Test sending surface ID
-            let res_surface = send_surface_id(&remote_port, 4242);
-            assert_eq!(res_surface, kCFMessagePortSuccess, "send_surface_id must succeed");
-
-            // Wait a bit for dispatch queue
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            assert_eq!(
-                RECEIVED_MSG.load(Ordering::SeqCst),
-                SYPHON_MSG_UPDATE_SURFACE_ID as u32
-            );
-            assert_eq!(RECEIVED_SURFACE.load(Ordering::SeqCst), 4242);
-
-            // Test sending new frame
-            let res_frame = send_new_frame(&remote_port);
-            assert_eq!(res_frame, kCFMessagePortSuccess, "send_new_frame must succeed");
-
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            assert_eq!(
-                RECEIVED_MSG.load(Ordering::SeqCst),
-                SYPHON_MSG_NEW_FRAME as u32
-            );
-
-            local_port.invalidate();
+            std::ptr::null()
         }
+
+        let port_name_str = "info.v002.Syphon.TestPort.12345";
+        let port_name = CFString::from_str(port_name_str);
+        let mut context = CFMessagePortContext {
+            version: 0,
+            info: std::ptr::null_mut(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+        let mut should_free = 0u8;
+
+        let local_port = unsafe {
+            CFMessagePort::new_local(
+                None,
+                Some(&port_name),
+                Some(test_callback),
+                &mut context,
+                &mut should_free,
+            )
+        }
+        .expect("local port");
+
+        let queue = DispatchQueue::new("test.queue", None);
+        unsafe {
+            local_port.set_dispatch_queue(Some(&queue));
+        }
+
+        let remote_port = CFMessagePort::new_remote(None, Some(&port_name)).expect("remote port");
+
+        // Test sending surface ID
+        let res_surface = send_surface_id(&remote_port, 4242);
+        assert_eq!(
+            res_surface, kCFMessagePortSuccess,
+            "send_surface_id must succeed"
+        );
+
+        // Wait a bit for dispatch queue
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            RECEIVED_MSG.load(Ordering::SeqCst),
+            SYPHON_MSG_UPDATE_SURFACE_ID as u32
+        );
+        assert_eq!(RECEIVED_SURFACE.load(Ordering::SeqCst), 4242);
+
+        // Test sending new frame
+        let res_frame = send_new_frame(&remote_port);
+        assert_eq!(
+            res_frame, kCFMessagePortSuccess,
+            "send_new_frame must succeed"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            RECEIVED_MSG.load(Ordering::SeqCst),
+            SYPHON_MSG_NEW_FRAME as u32
+        );
+
+        local_port.invalidate();
     }
+}
 
 #[cfg(target_os = "macos")]
 pub use macos::SyphonServer;
@@ -576,7 +581,9 @@ mod tests {
             NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(NSString::class(), &data)
                 .expect("unarchive string")
         };
-        let decoded_str = unarchived.downcast::<NSString>().expect("downcast NSString");
+        let decoded_str = unarchived
+            .downcast::<NSString>()
+            .expect("downcast NSString");
         assert_eq!(decoded_str.to_string(), "my-client-uuid-12345");
 
         let orig_num = NSNumber::new_u32(9999);
@@ -588,7 +595,9 @@ mod tests {
             NSKeyedUnarchiver::unarchivedObjectOfClass_fromData_error(NSNumber::class(), &num_data)
                 .expect("unarchive number")
         };
-        let decoded_num = unarchived_num.downcast::<NSNumber>().expect("downcast NSNumber");
+        let decoded_num = unarchived_num
+            .downcast::<NSNumber>()
+            .expect("downcast NSNumber");
         assert_eq!(decoded_num.as_u32(), 9999);
     }
 
